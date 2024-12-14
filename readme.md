@@ -85,7 +85,6 @@ This Streamlit application provides an advanced financial analysis and predictio
 - Streamlit
 - Pandas
 - Plotly
-- Custom prediction module (kontostand_vorhersage)
 
 ## Potential Use Cases
 - Personal finance tracking
