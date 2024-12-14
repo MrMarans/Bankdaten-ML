@@ -60,7 +60,7 @@ def main():
                     min_gehalt = st.number_input(
                         'Minimum amount for salary (€)',
                         min_value=0,
-                        value=1000,
+                        value=2100,
                         help='Incoming transfers above this amount will be recognized as potential salary'
                     )
                     min_gehalt_vorkommen = st.number_input(
@@ -75,13 +75,13 @@ def main():
                     min_fixkosten = st.number_input(
                         'Minimum amount for fixed costs (€)',
                         min_value=0,
-                        value=50,
+                        value=400,
                         help='Outgoing transfers above this amount will be recognized as potential fixed costs'
                     )
                     min_fixkosten_vorkommen = st.number_input(
                         'Minimum occurrences for fixed costs',
                         min_value=1,
-                        value=2,
+                        value=1,
                         help='How many times must a fixed cost payment occur at least?'
                     )
                     max_varianz = st.slider(
@@ -100,14 +100,14 @@ def main():
         if st.sidebar.button('Start Training'):
             # Progress indicator
             progress_text = "Operation in progress. Please wait."
-            progress_bar = st.progress(0, text=progress_text)
+            progress_bar = st.progress(0.15, text=progress_text)
             
             try:
                 # Reset file cursor position
                 uploaded_file.seek(0)
                 
                 # Progress: Load and prepare data (25%)
-                progress_bar.progress(0.25, text="Loading and preparing data...")
+                progress_bar.progress(0.0, text="Loading and preparing data...")
                 
                 results = process_and_predict(
                     uploaded_file, 

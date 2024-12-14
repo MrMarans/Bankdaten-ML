@@ -20,8 +20,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         if progress_callback:
             progress_callback(progress, text)
 
-    # Daten einlesen und vorbereiten
-    update_progress(0.01, "Daten werden eingelesen...")
+
     df = pd.read_csv(file, dayfirst=True, decimal=',', encoding='ISO-8859-1', sep=';')
     df = df.rename(columns={date_column: 'Buchungstag', amount_column: 'Betrag'})
     df['Buchungstag'] = pd.to_datetime(df['Buchungstag'], format='%d.%m.%y')
@@ -31,9 +30,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     original_length = len(df)
     df = df[df['Betrag'].abs() <= cutoff_value]
     filtered_length = len(df)
-    
-    # Tägliche Änderungen berechnen
-    update_progress(0.02, "Tägliche Änderungen werden berechnet...")
+
     df = df.sort_values('Buchungstag')
     daily_changes = df.groupby('Buchungstag')['Betrag'].sum().reset_index()
     daily_changes = daily_changes.set_index('Buchungstag')
@@ -47,8 +44,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     # Kontostand berechnen
     full_daily_df['Tatsächlicher_Betrag'] = start_balance + full_daily_df['Betrag'].cumsum()
     
-    # Monatliche Muster analysieren
-    update_progress(0.03, "Monatliche Muster werden analysiert...")
+
     df['Monat'] = df['Buchungstag'].dt.month
     df['Tag'] = df['Buchungstag'].dt.day
     monthly_patterns = df.groupby(['Monat', 'Tag'])['Betrag'].mean().reset_index()
@@ -90,8 +86,6 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         
         return income_by_day, expense_by_day
 
-    # Feature-Engineering
-    update_progress(0.04, "Features werden erstellt...")
     
     # Analysiere Transaktionsmuster
     income_patterns, expense_patterns = analyze_transactions(df)
@@ -188,8 +182,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         X[:, 7:]     # Zyklische Features (4)
     ])  # Gesamtform: (n_days, 11)
 
-    # Sequenzen erstellen (30 Tage) mit allen Features
-    update_progress(0.05, "Sequenzen werden erstellt...")
+
     seq_length = 30
     X_seq, y_seq = [], []
     
@@ -205,8 +198,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     X_train, X_test = X_seq[:train_size], X_seq[train_size:]
     y_train, y_test = y_seq[:train_size], y_seq[train_size:]
     
-    # Verbessertes Modell mit mehr Features
-    update_progress(0.06, "Modell wird erstellt...")
+
     model = Sequential([
         LSTM(64, input_shape=(seq_length, X_scaled.shape[1]), 
              return_sequences=True, 
@@ -226,8 +218,6 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         Dense(1, activation='linear')
     ])
     
-    # Training mit verbessertem Setup
-    update_progress(0.07, "Modell wird trainiert...")
     
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
     model.compile(optimizer=optimizer, 
@@ -254,7 +244,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     class TrainingProgressCallback(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
             if epoch % 5 == 0:  # Update alle 5 Epochen
-                progress = 0.07 + min((epoch/200) * 0.8, 0.8)  # Training von 7% bis 87%
+                progress = min((epoch/200) * 1, 0.8) 
                 update_progress(progress, 
                               f"Training Epoch {epoch+1}/200 - Loss: {logs['loss']:.4f}, Val Loss: {logs['val_loss']:.4f}")
 
