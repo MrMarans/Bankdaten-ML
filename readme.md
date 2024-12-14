@@ -41,6 +41,8 @@ This Streamlit application provides an advanced financial analysis and predictio
 
 ## How to Use
 
+  - Download the docker container: `docker pull mrmarans/bank_prediction_app:latest` or by downloading it with git and do "streamlit run kontostand_vorhersage.py"
+
 1. **Upload Data**
    - Click "Upload CSV file" in the sidebar
    - Select appropriate date and amount columns
