@@ -30,4 +30,3 @@ jobs:
         push: true
         tags: |
           mrmarans/bank_prediction_app:latest
-          mrmarans/bank_prediction_app:${{ github.sha }}
