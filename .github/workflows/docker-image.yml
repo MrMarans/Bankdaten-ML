@@ -29,4 +29,4 @@ jobs:
         context: .
         push: true
         tags: |
-          mrmarans/bank_prediction_app:latest
+           mrmarans/your-image-name:latest
