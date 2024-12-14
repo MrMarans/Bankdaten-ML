@@ -213,7 +213,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
              kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
         Dropout(0.3),
-        
+         
         LSTM(32, 
              kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
