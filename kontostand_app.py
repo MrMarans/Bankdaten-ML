@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from kontostand_vorhersage import process_and_predict
+import numpy as np
 
 def main():
     st.title('Kontostand Vorhersage')
@@ -86,20 +87,39 @@ def main():
                 fig = go.Figure()
                 
                 # Trainingsdaten
+                actual_values = np.array(results['actual_values'])
+                if len(actual_values.shape) > 1:
+                    actual_values = actual_values.flatten()
+                
                 fig.add_trace(go.Scatter(
                     x=results['dates'],
-                    y=results['actual_values'],
+                    y=actual_values,
                     name='Historische Daten',
                     line=dict(color='blue')
                 ))
                 
-                # Vorhersage
-                fig.add_trace(go.Scatter(
-                    x=results['future_dates'],
-                    y=results['future_prediction'].flatten(),
-                    name='Vorhersage',
-                    line=dict(color='red', dash='dot')
-                ))
+                # Vorhersage - Korrektur der Dimensionen
+                try:
+                    future_predictions = np.array(results['future_prediction'])
+                    if len(future_predictions.shape) > 1:
+                        # Wenn es ein 2D-Array ist, nehmen wir die dritte Spalte (Kontostand)
+                        if future_predictions.shape[1] == 13:
+                            future_predictions = future_predictions[:, 2]
+                        else:
+                            future_predictions = future_predictions.flatten()
+                    
+                    # Stelle sicher, dass die Arrays die richtige Länge haben
+                    if len(results['future_dates']) == len(future_predictions):
+                        fig.add_trace(go.Scatter(
+                            x=results['future_dates'],
+                            y=future_predictions,
+                            name='Vorhersage',
+                            line=dict(color='red', dash='dot')
+                        ))
+                    else:
+                        st.warning(f"Längen stimmen nicht überein: Dates={len(results['future_dates'])}, Predictions={len(future_predictions)}")
+                except Exception as e:
+                    st.warning(f"Fehler bei der Vorhersage-Visualisierung: {str(e)}")
                 
                 # Layout anpassen
                 fig.update_layout(
@@ -182,8 +202,13 @@ def main():
                     st.plotly_chart(fig_mae, use_container_width=True)
                     
                     # Rohdaten anzeigen
-                    st.subheader("Rohdaten")
+                    st.subheader("Rohdaten und Muster")
+                    
+                    # Original Transaktionen
+                    st.write("Alle Transaktionen:")
                     df_display = results['raw_data'].copy()
+                    df_display = df_display.reset_index()
+                    df_display = df_display.rename(columns={'index': 'Datum'})
                     
                     # Formatierung der Spalten
                     df_display['Datum'] = pd.to_datetime(df_display['Datum']).dt.strftime('%Y-%m-%d')
@@ -191,7 +216,72 @@ def main():
                         if col in df_display.columns:
                             df_display[col] = df_display[col].round(2).apply(lambda x: f"{x:,.2f} €")
                     
-                    print(df_display)
+                    st.dataframe(df_display)
+                    
+                    # Erkannte Muster
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write("Regelmäßige Eingänge:")
+                        if 'income_patterns' in results:
+                            income_df = results['income_patterns'].copy()
+                            income_df['mean'] = income_df['mean'].round(2).apply(lambda x: f"{x:,.2f} €")
+                            income_df['std'] = income_df['std'].round(2).apply(lambda x: f"{x:,.2f} €")
+                            st.dataframe(income_df)
+                        else:
+                            st.write("Keine regelmäßigen Eingänge erkannt")
+                    
+                    with col2:
+                        st.write("Regelmäßige Ausgänge:")
+                        if 'expense_patterns' in results:
+                            expense_df = results['expense_patterns'].copy()
+                            expense_df['mean'] = expense_df['mean'].round(2).apply(lambda x: f"{x:,.2f} €")
+                            expense_df['std'] = expense_df['std'].round(2).apply(lambda x: f"{x:,.2f} €")
+                            st.dataframe(expense_df)
+                        else:
+                            st.write("Keine regelmäßigen Ausgänge erkannt")
+                    
+                    # Trainingsdaten anzeigen
+                    st.subheader("Trainings-Sequenzen")
+                    
+                    # X_train anzeigen
+                    st.write("Eingabe-Sequenzen (X_train):")
+                    if 'X_train' in results:
+                        # Erstelle ein DataFrame aus den Trainingsdaten
+                        x_train_df = pd.DataFrame(
+                            results['X_train'].reshape(-1, results['X_train'].shape[-1]),
+                            columns=[f'Feature_{i+1}' for i in range(results['X_train'].shape[-1])]
+                        )
+                        st.dataframe(x_train_df.head(100))  # Zeige die ersten 100 Zeilen
+                        st.write(f"Shape X_train: {results['X_train'].shape}")
+                    
+                    # y_train anzeigen
+                    st.write("Zielwerte (y_train):")
+                    if 'y_train' in results:
+                        y_train_df = pd.DataFrame(results['y_train'], columns=['Zielwert'])
+                        st.dataframe(y_train_df.head(100))  # Zeige die ersten 100 Zeilen
+                        st.write(f"Shape y_train: {results['y_train'].shape}")
+                    
+                    # Ursprüngliche Features anzeigen
+                    st.subheader("Ursprüngliche Features (vor Skalierung)")
+                    if 'X_original' in results:
+                        st.write("Feature-Werte vor der Skalierung:")
+                        x_orig_display = results['X_original'].copy()
+                        x_orig_display = x_orig_display.reset_index()
+                        x_orig_display = x_orig_display.rename(columns={'index': 'Datum'})
+                        
+                        # Formatierung der Spalten
+                        x_orig_display['Datum'] = pd.to_datetime(x_orig_display['Datum']).dt.strftime('%Y-%m-%d')
+                        
+                        # Formatiere numerische Spalten
+                        for col in x_orig_display.columns:
+                            if 'Betrag' in col or 'Kontostand' in col:
+                                x_orig_display[col] = x_orig_display[col].round(2).apply(lambda x: f"{x:,.2f} €")
+                            elif col != 'Datum':
+                                x_orig_display[col] = x_orig_display[col].round(4)
+                        
+                        st.dataframe(x_orig_display.head(100))  # Zeige die ersten 100 Zeilen
+                        st.write(f"Shape: {results['X_original'].shape}")
                 
             except Exception as e:
                 st.error(f"Fehler bei der Verarbeitung: {str(e)}")

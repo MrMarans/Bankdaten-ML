@@ -50,33 +50,118 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     df['Tag'] = df['Buchungstag'].dt.day
     monthly_patterns = df.groupby(['Monat', 'Tag'])['Betrag'].mean().reset_index()
     
-    # Einfaches Feature-Engineering
+    # Verbesserte Analyse der Zahlungsmuster
+    def analyze_transactions(df):
+        # Separate Ein- und Ausgänge
+        income_df = df[df['Betrag'] > 0].copy()
+        expense_df = df[df['Betrag'] < 0].copy()
+        
+        # Analyse der Eingänge
+        income_patterns = {
+            'gehalt': {
+                'min_amount': 1000,  # Mindestbetrag für Gehalt
+                'max_variance': 100,  # Maximale Abweichung
+                'transactions': []
+            },
+            'andere_eingaenge': {
+                'min_amount': 100,
+                'transactions': []
+            }
+        }
+        
+        # Analyse der Ausgänge
+        expense_patterns = {
+            'miete': {
+                'min_amount': 400,  # Typischer Mindestbetrag für Miete
+                'max_variance': 50,
+                'transactions': []
+            },
+            'fixkosten': {
+                'min_amount': 50,  # Kleinere regelmäßige Zahlungen
+                'max_variance': 20,
+                'transactions': []
+            }
+        }
+        
+        # Gruppiere Eingänge nach Tag im Monat
+        income_by_day = income_df.groupby('Tag')['Betrag'].agg(['mean', 'std', 'count']).reset_index()
+        income_by_day = income_by_day[income_by_day['count'] >= 2]  # Mindestens 2 Vorkommen
+        
+        # Gruppiere Ausgänge nach Tag im Monat
+        expense_by_day = expense_df.groupby('Tag')['Betrag'].agg(['mean', 'std', 'count']).reset_index()
+        expense_by_day = expense_by_day[expense_by_day['count'] >= 2]
+        
+        return income_by_day, expense_by_day
+
+    # Feature-Engineering
     update_progress(0.04, "Features werden erstellt...")
-    X = np.column_stack([
-        full_daily_df.index.day,
-        full_daily_df.index.month,
-        full_daily_df['Tatsächlicher_Betrag'].values
-    ])
+    
+    # Analysiere Transaktionsmuster
+    income_patterns, expense_patterns = analyze_transactions(df)
+    
+    # Erstelle Features für jeden Tag
+    def create_daily_features(date, patterns, is_income=True):
+        day = date.day
+        features = np.zeros(2)  # [ist_zahlungstag, tage_bis_zahlung]
+        
+        matching_pattern = patterns[patterns['Tag'] == day]
+        if not matching_pattern.empty:
+            features[0] = 1  # Zahlungstag
+        
+        # Finde nächsten Zahlungstag
+        next_days = patterns[patterns['Tag'] > day]['Tag']
+        if not next_days.empty:
+            next_day = next_days.iloc[0]
+            features[1] = (next_day - day) / 31.0
+        else:
+            next_day = patterns['Tag'].iloc[0]
+            features[1] = (30 - day + next_day) / 31.0
+            
+        return features
+
+    # Erstelle Features für alle Tage
+    daily_features = []
+    for date in full_daily_df.index:
+        income_feats = create_daily_features(date, income_patterns, True)
+        expense_feats = create_daily_features(date, expense_patterns, False)
+        
+        # Kombiniere Features
+        day_features = np.concatenate([
+            [date.day / 31.0, date.month / 12.0],  # Normalisierte Zeit-Features (2)
+            [full_daily_df.loc[date, 'Tatsächlicher_Betrag']],  # Kontostand (1)
+            income_feats,  # Eingangs-Features (2) - nur Zahlungstag und Tage bis zur nächsten Zahlung
+            expense_feats,  # Ausgangs-Features (2) - nur Zahlungstag und Tage bis zur nächsten Zahlung
+            [np.sin(2 * np.pi * date.day / 31.0), np.cos(2 * np.pi * date.day / 31.0)],  # Zyklische Tages-Features (2)
+            [np.sin(2 * np.pi * date.month / 12.0), np.cos(2 * np.pi * date.month / 12.0)]  # Zyklische Monats-Features (2)
+        ])
+        daily_features.append(day_features)
+
+    X = np.array(daily_features)  # Shape: (n_days, 11) - 11 Features total
     
     # Separate Normalisierung für verschiedene Features
     scaler_date = MinMaxScaler()
     scaler_month = MinMaxScaler()
     scaler_balance = MinMaxScaler()
     
+    # Erstelle erweiterte Features mit Zahlungsmustern
     X_scaled = np.column_stack([
-        scaler_date.fit_transform(X[:, 0].reshape(-1, 1)),
-        scaler_month.fit_transform(X[:, 1].reshape(-1, 1)),
-        scaler_balance.fit_transform(X[:, 2].reshape(-1, 1))
-    ])
-    
-    # Sequenzen erstellen (30 Tage)
+        scaler_date.fit_transform(X[:, 0].reshape(-1, 1)),      # Tag (1)
+        scaler_month.fit_transform(X[:, 1].reshape(-1, 1)),     # Monat (1)
+        scaler_balance.fit_transform(X[:, 2].reshape(-1, 1)),   # Kontostand (1)
+        X[:, 3:5],   # Income Features (2) - Zahlungstag und Tage bis zur nächsten Zahlung
+        X[:, 5:7],   # Expense Features (2) - Zahlungstag und Tage bis zur nächsten Zahlung
+        X[:, 7:]     # Zyklische Features (4)
+    ])  # Gesamtform: (n_days, 11)
+
+    # Sequenzen erstellen (30 Tage) mit allen Features
     update_progress(0.05, "Sequenzen werden erstellt...")
     seq_length = 30
     X_seq, y_seq = [], []
+    
     for i in range(len(X_scaled) - seq_length):
         X_seq.append(X_scaled[i:(i + seq_length)])
-        y_seq.append(X_scaled[i + seq_length, 2])  # Nur Kontostand vorhersagen
-        
+        y_seq.append(X_scaled[i + seq_length, 2])  # Vorhersage des Kontostands
+    
     X_seq = np.array(X_seq)
     y_seq = np.array(y_seq)
     
@@ -85,23 +170,21 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     X_train, X_test = X_seq[:train_size], X_seq[train_size:]
     y_train, y_test = y_seq[:train_size], y_seq[train_size:]
     
-    # Verbessertes Modell mit Regularisierung
+    # Verbessertes Modell mit mehr Features
     update_progress(0.06, "Modell wird erstellt...")
     model = Sequential([
-        LSTM(32, input_shape=(seq_length, X_scaled.shape[1]), 
+        LSTM(64, input_shape=(seq_length, X_scaled.shape[1]), 
              return_sequences=True, 
-             kernel_regularizer=tf.keras.regularizers.l2(0.01),
-             recurrent_regularizer=tf.keras.regularizers.l2(0.01)),
+             kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
         Dropout(0.3),
         
-        LSTM(16, 
-             kernel_regularizer=tf.keras.regularizers.l2(0.01),
-             recurrent_regularizer=tf.keras.regularizers.l2(0.01)),
+        LSTM(32, 
+             kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
         Dropout(0.3),
         
-        Dense(8, activation='relu',
+        Dense(16, activation='relu',
               kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
         
@@ -152,7 +235,7 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     
     # Vorhersage
     update_progress(0.87, "Vorhersage wird erstellt...")
-    last_sequence = X_scaled[-seq_length:]
+    last_sequence = X_scaled[-seq_length:]  # Shape: (seq_length, 15)
     future_scaled = []
     
     for _ in range(days_to_predict):
@@ -160,13 +243,37 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         
         # Nächstes Datum
         last_date = full_daily_df.index[-1] + pd.Timedelta(days=len(future_scaled) + 1)
-        next_day = last_date.day
-        next_month = last_date.month
         
-        # Neue Sequenz
-        next_features = np.array([[next_day, next_month, next_pred[0][0]]])
+        # Feature-Erstellung für das neue Datum
+        next_day = last_date.day / 31.0
+        next_month = last_date.month / 12.0
+        
+        # Zahlungsmuster-Features
+        next_income = create_daily_features(last_date, income_patterns, True)
+        next_expense = create_daily_features(last_date, expense_patterns, False)
+        
+        # Zyklische Features
+        next_sin_day = np.sin(2 * np.pi * last_date.day / 31.0)
+        next_cos_day = np.cos(2 * np.pi * last_date.day / 31.0)
+        next_sin_month = np.sin(2 * np.pi * last_date.month / 12.0)
+        next_cos_month = np.cos(2 * np.pi * last_date.month / 12.0)
+        
+        # Kombiniere alle Features in der gleichen Reihenfolge wie beim Training
+        next_features = np.array([
+            next_day,                    # Tag (1)
+            next_month,                  # Monat (1)
+            next_pred[0][0],            # Vorhergesagter Kontostand (1)
+            *next_income,               # Income Features (2)
+            *next_expense,              # Expense Features (2)
+            next_sin_day, next_cos_day,  # Zyklische Tages-Features (2)
+            next_sin_month, next_cos_month  # Zyklische Monats-Features (2)
+        ]).reshape(1, -1)  # Shape: (1, 11)
+        
+        # Update sequence
         last_sequence = np.vstack([last_sequence[1:], next_features])
         future_scaled.append(next_pred[0][0])
+    
+    future_scaled = np.array(future_scaled)
     
     # Transformation zurück
     update_progress(0.93, "Ergebnisse werden aufbereitet...")
@@ -206,14 +313,29 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         'Validation MAE': history.history['val_mae']
     })
     
+    # Erstelle ein DataFrame mit den ursprünglichen Features
+    feature_names = [
+        'Tag', 'Monat', 'Kontostand',
+        'Eingang_Zahlungstag', 'Eingang_Tage_bis_Zahlung',
+        'Ausgang_Zahlungstag', 'Ausgang_Tage_bis_Zahlung',
+        'Sin_Tag', 'Cos_Tag', 'Sin_Monat', 'Cos_Monat'
+    ]
+    
+    X_original_df = pd.DataFrame(X, columns=feature_names, index=full_daily_df.index)
+
     return {
         'dates': full_daily_df.index,
         'actual_values': full_daily_df['Tatsächlicher_Betrag'].values,
         'future_dates': future_dates,
         'future_prediction': future_predictions.reshape(-1, 1),
         'training_history': history.history,
-        'training_df': training_df,  # Neues DataFrame für Trainingsverlauf
-        'raw_data': full_daily_df,   # Rohdaten für die Anzeige
+        'training_df': training_df,
+        'raw_data': full_daily_df,
+        'income_patterns': income_patterns,
+        'expense_patterns': expense_patterns,
+        'X_train': X_train,
+        'y_train': y_train,
+        'X_original': X_original_df,  # Neu: Ursprüngliche Features als DataFrame
         'statistics': {
             'total_transactions': original_length,
             'min_amount': df['Betrag'].min(),
