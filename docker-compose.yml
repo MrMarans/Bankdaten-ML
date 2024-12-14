@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  kontostand-app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./exclude:/app/exclude
+    environment:
+      - TZ=Europe/Berlin
+    restart: unless-stopped
+    # Limit resources to keep container small
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G

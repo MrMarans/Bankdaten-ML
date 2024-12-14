@@ -1,0 +1,4 @@
+Kreissparkasse -> Filtern von so weit wie geht bis heute -> Exportieren als CSV-Gefilterte Einträge. 
+Bankdaten-ML.zip entpacken -> csv in den Ordner "exclude". Die  CSV muss "data" heißen, oder du musst es im Script ändern.
+Dann über Poetry die sachen installieren. Einziges Python Script starten...
+Dann wird dein Kontostand für ein Jahr in vorraus vorhergesagt. Kann man im Script aber ändern. 
