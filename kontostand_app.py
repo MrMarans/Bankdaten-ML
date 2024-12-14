@@ -45,12 +45,52 @@ def main():
                         index=columns.index('Betrag') if 'Betrag' in columns else 0
                     )
                     
-                    # Parameter
-                    st.subheader('Parameter')
+                    # Grundlegende Parameter
+                    st.subheader('Grundeinstellungen')
                     start_balance = st.number_input('Startbetrag (€)', value=937)
                     cutoff_value = st.number_input('Cutoff-Wert für Beträge (€)', value=5000)
                     prediction_days = st.number_input('Anzahl Tage für Vorhersage', 
                                                     min_value=30, max_value=365, value=60)
+                    
+                    # Muster-Erkennungs-Parameter
+                    st.subheader('Muster-Erkennung')
+                    
+                    # Gehaltserkennung
+                    st.write("Gehaltserkennung:")
+                    min_gehalt = st.number_input(
+                        'Mindestbetrag für Gehalt (€)',
+                        min_value=0,
+                        value=1000,
+                        help='Eingänge über diesem Betrag werden als potentielles Gehalt erkannt'
+                    )
+                    min_gehalt_vorkommen = st.number_input(
+                        'Minimale Anzahl Vorkommen für Gehalt',
+                        min_value=1,
+                        value=1,
+                        help='Wie oft muss ein Gehalt mindestens vorkommen?'
+                    )
+                    
+                    # Fixkosten-Erkennung
+                    st.write("Fixkosten-Erkennung:")
+                    min_fixkosten = st.number_input(
+                        'Mindestbetrag für Fixkosten (€)',
+                        min_value=0,
+                        value=50,
+                        help='Ausgänge über diesem Betrag werden als potentielle Fixkosten erkannt'
+                    )
+                    min_fixkosten_vorkommen = st.number_input(
+                        'Minimale Anzahl Vorkommen für Fixkosten',
+                        min_value=1,
+                        value=2,
+                        help='Wie oft muss eine Fixkostenzahlung mindestens vorkommen?'
+                    )
+                    max_varianz = st.slider(
+                        'Maximale Varianz für Fixkosten (%)',
+                        min_value=0,
+                        max_value=100,
+                        value=30,
+                        help='Maximale prozentuale Abweichung für Fixkosten'
+                    )
             except Exception as e:
                 st.error(f"Fehler beim Lesen der CSV-Datei: {str(e)}")
                 return
@@ -76,6 +116,11 @@ def main():
                     days_to_predict=prediction_days,
                     date_column=date_column,
                     amount_column=amount_column,
+                    min_gehalt=min_gehalt,
+                    min_gehalt_vorkommen=min_gehalt_vorkommen,
+                    min_fixkosten=min_fixkosten,
+                    min_fixkosten_vorkommen=min_fixkosten_vorkommen,
+                    max_varianz=max_varianz/100.0,  # Konvertiere Prozent zu Dezimal
                     progress_callback=lambda p, t: progress_bar.progress(0.25 + p * 0.75, text=t)
                 )
                 
@@ -86,7 +131,7 @@ def main():
                 # Haupt-Visualisierung
                 fig = go.Figure()
                 
-                # Trainingsdaten
+                # Trainingsdaten (Hauptlinie)
                 actual_values = np.array(results['actual_values'])
                 if len(actual_values.shape) > 1:
                     actual_values = actual_values.flatten()
@@ -98,26 +143,76 @@ def main():
                     line=dict(color='blue')
                 ))
                 
-                # Vorhersage - Korrektur der Dimensionen
+                # Gehaltseingänge als Marker
+                if 'income_patterns' in results:
+                    income_df = results['income_patterns']
+                    gehalt_tage = income_df[income_df['ist_gehalt']]['Tag'].values
+                    gehalt_betraege = income_df[income_df['ist_gehalt']]['mean'].values
+                    
+                    # Finde alle Gehaltsdaten
+                    gehalt_dates = []
+                    gehalt_values = []
+                    for date in results['dates']:
+                        if date.day in gehalt_tage:
+                            gehalt_dates.append(date)
+                            idx = np.where(gehalt_tage == date.day)[0][0]
+                            gehalt_values.append(actual_values[results['dates'].get_loc(date)])
+                    
+                    fig.add_trace(go.Scatter(
+                        x=gehalt_dates,
+                        y=gehalt_values,
+                        mode='markers',
+                        name='Gehaltseingänge',
+                        marker=dict(
+                            size=12,
+                            symbol='star',
+                            color='green',
+                            line=dict(width=2, color='darkgreen')
+                        ),
+                        hovertemplate="Gehalt am %{x}<br>Betrag: %{y:.2f}€"
+                    ))
+                
+                # Fixkosten als Marker
+                if 'expense_patterns' in results:
+                    expense_df = results['expense_patterns']
+                    fixkosten_tage = expense_df[expense_df['ist_fixkosten']]['Tag'].values
+                    fixkosten_betraege = expense_df[expense_df['ist_fixkosten']]['mean'].values
+                    
+                    # Finde alle Fixkosten-Daten
+                    fixkosten_dates = []
+                    fixkosten_values = []
+                    for date in results['dates']:
+                        if date.day in fixkosten_tage:
+                            fixkosten_dates.append(date)
+                            idx = np.where(fixkosten_tage == date.day)[0][0]
+                            fixkosten_values.append(actual_values[results['dates'].get_loc(date)])
+                    
+                    fig.add_trace(go.Scatter(
+                        x=fixkosten_dates,
+                        y=fixkosten_values,
+                        mode='markers',
+                        name='Fixkosten',
+                        marker=dict(
+                            size=10,
+                            symbol='x',
+                            color='red',
+                            line=dict(width=2, color='darkred')
+                        ),
+                        hovertemplate="Fixkosten am %{x}<br>Betrag: %{y:.2f}€"
+                    ))
+                
+                # Vorhersage
                 try:
                     future_predictions = np.array(results['future_prediction'])
                     if len(future_predictions.shape) > 1:
-                        # Wenn es ein 2D-Array ist, nehmen wir die dritte Spalte (Kontostand)
-                        if future_predictions.shape[1] == 13:
-                            future_predictions = future_predictions[:, 2]
-                        else:
-                            future_predictions = future_predictions.flatten()
+                        future_predictions = future_predictions.flatten()
                     
-                    # Stelle sicher, dass die Arrays die richtige Länge haben
-                    if len(results['future_dates']) == len(future_predictions):
-                        fig.add_trace(go.Scatter(
-                            x=results['future_dates'],
-                            y=future_predictions,
-                            name='Vorhersage',
-                            line=dict(color='red', dash='dot')
-                        ))
-                    else:
-                        st.warning(f"Längen stimmen nicht überein: Dates={len(results['future_dates'])}, Predictions={len(future_predictions)}")
+                    fig.add_trace(go.Scatter(
+                        x=results['future_dates'],
+                        y=future_predictions,
+                        name='Vorhersage',
+                        line=dict(color='red', dash='dot')
+                    ))
                 except Exception as e:
                     st.warning(f"Fehler bei der Vorhersage-Visualisierung: {str(e)}")
                 
@@ -126,8 +221,14 @@ def main():
                     title='Kontostand: Historie und Vorhersage',
                     xaxis_title='Datum',
                     yaxis_title='Betrag (€)',
-                    hovermode='x unified',
-                    showlegend=True
+                    hovermode='closest',
+                    showlegend=True,
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=0.01
+                    )
                 )
                 
                 # Plot anzeigen

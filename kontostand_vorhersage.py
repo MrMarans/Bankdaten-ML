@@ -12,7 +12,10 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', message='.*The name tf.executing_eagerly_outside_functions is deprecated.*')
 
 def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_predict=180, 
-                     date_column='Buchungstag', amount_column='Betrag', progress_callback=None):
+                     date_column='Buchungstag', amount_column='Betrag', 
+                     min_gehalt=1000, min_gehalt_vorkommen=1,
+                     min_fixkosten=50, min_fixkosten_vorkommen=2,
+                     max_varianz=0.3, progress_callback=None):
     def update_progress(progress, text):
         if progress_callback:
             progress_callback(progress, text)
@@ -52,44 +55,38 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     
     # Verbesserte Analyse der Zahlungsmuster
     def analyze_transactions(df):
-        # Separate Ein- und Ausgänge
-        income_df = df[df['Betrag'] > 0].copy()
-        expense_df = df[df['Betrag'] < 0].copy()
+        # Nur Tage mit tatsächlichen Transaktionen betrachten
+        income_df = df[df['Betrag'] > min_gehalt].copy()
+        expense_df = df[df['Betrag'] < -min_fixkosten].copy()
         
-        # Analyse der Eingänge
-        income_patterns = {
-            'gehalt': {
-                'min_amount': 1000,  # Mindestbetrag für Gehalt
-                'max_variance': 100,  # Maximale Abweichung
-                'transactions': []
-            },
-            'andere_eingaenge': {
-                'min_amount': 100,
-                'transactions': []
-            }
-        }
+        # Gruppiere nach Tag und berechne Statistiken nur für Tage mit Transaktionen
+        income_by_day = (income_df.groupby(['Monat', 'Tag'])['Betrag']
+                        .agg(['count', 'mean', 'std'])
+                        .reset_index())
         
-        # Analyse der Ausgänge
-        expense_patterns = {
-            'miete': {
-                'min_amount': 400,  # Typischer Mindestbetrag für Miete
-                'max_variance': 50,
-                'transactions': []
-            },
-            'fixkosten': {
-                'min_amount': 50,  # Kleinere regelmäßige Zahlungen
-                'max_variance': 20,
-                'transactions': []
-            }
-        }
+        expense_by_day = (expense_df.groupby(['Monat', 'Tag'])['Betrag']
+                         .agg(['count', 'mean', 'std'])
+                         .reset_index())
         
-        # Gruppiere Eingänge nach Tag im Monat
-        income_by_day = income_df.groupby('Tag')['Betrag'].agg(['mean', 'std', 'count']).reset_index()
-        income_by_day = income_by_day[income_by_day['count'] >= 2]  # Mindestens 2 Vorkommen
+        # Identifiziere echte Gehaltseingänge (nur wenn tatsächlich Geld eingegangen ist)
+        income_by_day['ist_gehalt'] = (
+            (income_by_day['mean'] > min_gehalt) &  # Mindestbetrag für Gehalt
+            (income_by_day['count'] >= min_gehalt_vorkommen) &  # Mindestens n Vorkommen
+            (income_by_day['std'] / income_by_day['mean'] < 0.5)  # Maximal 50% Abweichung
+        )
         
-        # Gruppiere Ausgänge nach Tag im Monat
-        expense_by_day = expense_df.groupby('Tag')['Betrag'].agg(['mean', 'std', 'count']).reset_index()
-        expense_by_day = expense_by_day[expense_by_day['count'] >= 2]
+        # Identifiziere echte Fixkosten (nur wenn tatsächlich Abbuchungen erfolgten)
+        expense_by_day['ist_fixkosten'] = (
+            (expense_by_day['mean'] < -min_fixkosten) &  # Mindestbetrag für Fixkosten
+            (expense_by_day['count'] >= min_fixkosten_vorkommen) &  # Mindestens n Vorkommen
+            (expense_by_day['std'] / expense_by_day['mean'].abs() < max_varianz)  # Maximale Varianz
+        )
+        
+        # Gewichte die Gehaltseingänge nach ihrer Häufigkeit und Höhe
+        income_by_day['gewichtung'] = (
+            (income_by_day['count'] / income_by_day['count'].max()) * 
+            (income_by_day['mean'] / income_by_day['mean'].max())
+        )
         
         return income_by_day, expense_by_day
 
@@ -99,24 +96,62 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     # Analysiere Transaktionsmuster
     income_patterns, expense_patterns = analyze_transactions(df)
     
-    # Erstelle Features für jeden Tag
     def create_daily_features(date, patterns, is_income=True):
         day = date.day
+        month = date.month
         features = np.zeros(2)  # [ist_zahlungstag, tage_bis_zahlung]
         
-        matching_pattern = patterns[patterns['Tag'] == day]
-        if not matching_pattern.empty:
-            features[0] = 1  # Zahlungstag
+        # Finde Muster für diesen Tag und Monat
+        matching_pattern = patterns[
+            (patterns['Tag'] == day) & 
+            (patterns['Monat'] == month)
+        ]
         
-        # Finde nächsten Zahlungstag
-        next_days = patterns[patterns['Tag'] > day]['Tag']
-        if not next_days.empty:
+        if not matching_pattern.empty:
+            if is_income and matching_pattern['ist_gehalt'].iloc[0]:
+                features[0] = 1  # Gehaltszahlungstag
+                if 'gewichtung' in matching_pattern.columns:
+                    features[0] *= matching_pattern['gewichtung'].iloc[0]
+            elif not is_income and matching_pattern['ist_fixkosten'].iloc[0]:
+                features[0] = 1  # Fixkostentag
+        
+        # Finde nächsten relevanten Zahlungstag im gleichen Monat
+        if is_income:
+            next_days = patterns[
+                (patterns['Monat'] == month) & 
+                (patterns['Tag'] > day) & 
+                patterns['ist_gehalt']
+            ]['Tag']
+        else:
+            next_days = patterns[
+                (patterns['Monat'] == month) & 
+                (patterns['Tag'] > day) & 
+                patterns['ist_fixkosten']
+            ]['Tag']
+        
+        if len(next_days) > 0:
             next_day = next_days.iloc[0]
             features[1] = (next_day - day) / 31.0
         else:
-            next_day = patterns['Tag'].iloc[0]
-            features[1] = (30 - day + next_day) / 31.0
+            # Suche im nächsten Monat
+            next_month = (month % 12) + 1
+            if is_income:
+                next_days = patterns[
+                    (patterns['Monat'] == next_month) & 
+                    patterns['ist_gehalt']
+                ]['Tag']
+            else:
+                next_days = patterns[
+                    (patterns['Monat'] == next_month) & 
+                    patterns['ist_fixkosten']
+                ]['Tag']
             
+            if len(next_days) > 0:
+                next_day = next_days.iloc[0]
+                features[1] = (31 - day + next_day) / 31.0
+            else:
+                features[1] = 1.0  # Kein nächster Zahlungstag gefunden
+        
         return features
 
     # Erstelle Features für alle Tage
