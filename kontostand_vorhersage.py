@@ -90,61 +90,44 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     # Analysiere Transaktionsmuster
     income_patterns, expense_patterns = analyze_transactions(df)
     
+    # Verbesserte Funktion für Feature-Erstellung
     def create_daily_features(date, patterns, is_income=True):
         day = date.day
         month = date.month
-        features = np.zeros(2)  # [ist_zahlungstag, tage_bis_zahlung]
+        # Mehr Features für detailliertere Muster [ist_zahlungstag, erwarteter_betrag, tage_bis_zahlung]
+        features = np.zeros(3)
         
         # Finde Muster für diesen Tag und Monat
         matching_pattern = patterns[
             (patterns['Tag'] == day) & 
-            (patterns['Monat'] == month)
+            (patterns['ist_gehalt' if is_income else 'ist_fixkosten'])
         ]
         
         if not matching_pattern.empty:
-            if is_income and matching_pattern['ist_gehalt'].iloc[0]:
-                features[0] = 1  # Gehaltszahlungstag
-                if 'gewichtung' in matching_pattern.columns:
-                    features[0] *= matching_pattern['gewichtung'].iloc[0]
-            elif not is_income and matching_pattern['ist_fixkosten'].iloc[0]:
-                features[0] = 1  # Fixkostentag
+            features[0] = 1  # Ist ein Zahlungstag
+            # Erwarteter Betrag (normalisiert)
+            features[1] = matching_pattern['mean'].iloc[0] / (5000 if is_income else 2000)
+            if 'gewichtung' in matching_pattern.columns and is_income:
+                features[0] *= matching_pattern['gewichtung'].iloc[0]
         
-        # Finde nächsten relevanten Zahlungstag im gleichen Monat
-        if is_income:
-            next_days = patterns[
-                (patterns['Monat'] == month) & 
-                (patterns['Tag'] > day) & 
-                patterns['ist_gehalt']
-            ]['Tag']
-        else:
-            next_days = patterns[
-                (patterns['Monat'] == month) & 
-                (patterns['Tag'] > day) & 
-                patterns['ist_fixkosten']
-            ]['Tag']
+        # Finde nächsten relevanten Zahlungstag
+        relevant_patterns = patterns[patterns['ist_gehalt' if is_income else 'ist_fixkosten']]
+        
+        # Finde nächsten Zahlungstag im gleichen Monat
+        next_days = relevant_patterns[
+            (relevant_patterns['Tag'] > day)
+        ]['Tag']
         
         if len(next_days) > 0:
-            next_day = next_days.iloc[0]
-            features[1] = (next_day - day) / 31.0
+            next_day = next_days.min()
+            features[2] = (next_day - day) / 31.0
         else:
-            # Suche im nächsten Monat
-            next_month = (month % 12) + 1
-            if is_income:
-                next_days = patterns[
-                    (patterns['Monat'] == next_month) & 
-                    patterns['ist_gehalt']
-                ]['Tag']
+            # Suche den ersten Zahlungstag
+            if len(relevant_patterns) > 0:
+                next_day = relevant_patterns['Tag'].min()
+                features[2] = (31 - day + next_day) / 31.0
             else:
-                next_days = patterns[
-                    (patterns['Monat'] == next_month) & 
-                    patterns['ist_fixkosten']
-                ]['Tag']
-            
-            if len(next_days) > 0:
-                next_day = next_days.iloc[0]
-                features[1] = (31 - day + next_day) / 31.0
-            else:
-                features[1] = 1.0  # Kein nächster Zahlungstag gefunden
+                features[2] = 1.0  # Kein nächster Zahlungstag gefunden
         
         return features
 
@@ -154,18 +137,46 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         income_feats = create_daily_features(date, income_patterns, True)
         expense_feats = create_daily_features(date, expense_patterns, False)
         
+        # Extrahiere Gehaltsbetrag für diesen Tag wenn es ein Gehaltszahlungstag ist
+        gehalt_heute = 0
+        if any(income_patterns[
+            (income_patterns['Tag'] == date.day) & 
+            income_patterns['ist_gehalt']
+        ].index):
+            gehalt_muster = income_patterns[
+                (income_patterns['Tag'] == date.day) & 
+                income_patterns['ist_gehalt']
+            ]
+            gehalt_heute = gehalt_muster['mean'].iloc[0] if not gehalt_muster.empty else 0
+        
+        # Extrahiere Fixkostenbetrag für diesen Tag wenn es ein Fixkostentag ist
+        fixkosten_heute = 0
+        if any(expense_patterns[
+            (expense_patterns['Tag'] == date.day) & 
+            expense_patterns['ist_fixkosten']
+        ].index):
+            fixkosten_muster = expense_patterns[
+                (expense_patterns['Tag'] == date.day) & 
+                expense_patterns['ist_fixkosten']
+            ]
+            fixkosten_heute = fixkosten_muster['mean'].iloc[0] if not fixkosten_muster.empty else 0
+        
         # Kombiniere Features
         day_features = np.concatenate([
             [date.day / 31.0, date.month / 12.0],  # Normalisierte Zeit-Features (2)
             [full_daily_df.loc[date, 'Tatsächlicher_Betrag']],  # Kontostand (1)
-            income_feats,  # Eingangs-Features (2) - nur Zahlungstag und Tage bis zur nächsten Zahlung
-            expense_feats,  # Ausgangs-Features (2) - nur Zahlungstag und Tage bis zur nächsten Zahlung
+            income_feats,  # Eingangs-Features (3)
+            expense_feats,  # Ausgangs-Features (3)
             [np.sin(2 * np.pi * date.day / 31.0), np.cos(2 * np.pi * date.day / 31.0)],  # Zyklische Tages-Features (2)
-            [np.sin(2 * np.pi * date.month / 12.0), np.cos(2 * np.pi * date.month / 12.0)]  # Zyklische Monats-Features (2)
+            [np.sin(2 * np.pi * date.month / 12.0), np.cos(2 * np.pi * date.month / 12.0)],  # Zyklische Monats-Features (2)
+            [gehalt_heute / 5000.0],  # Normalisierter Gehaltsbetrag heute (1)
+            [abs(fixkosten_heute) / 2000.0],  # Normalisierter Fixkostenbetrag heute (1)
+            [1 if date.day <= 7 else 0],  # Ist Anfang des Monats (1)
+            [1 if date.day >= 25 else 0],  # Ist Ende des Monats (1)
         ])
         daily_features.append(day_features)
 
-    X = np.array(daily_features)  # Shape: (n_days, 11) - 11 Features total
+    X = np.array(daily_features)  # Shape: (n_days, 17) - 17 Features total
     
     # Separate Normalisierung für verschiedene Features
     scaler_date = MinMaxScaler()
@@ -177,42 +188,65 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         scaler_date.fit_transform(X[:, 0].reshape(-1, 1)),      # Tag (1)
         scaler_month.fit_transform(X[:, 1].reshape(-1, 1)),     # Monat (1)
         scaler_balance.fit_transform(X[:, 2].reshape(-1, 1)),   # Kontostand (1)
-        X[:, 3:5],   # Income Features (2) - Zahlungstag und Tage bis zur nächsten Zahlung
-        X[:, 5:7],   # Expense Features (2) - Zahlungstag und Tage bis zur nächsten Zahlung
-        X[:, 7:]     # Zyklische Features (4)
-    ])  # Gesamtform: (n_days, 11)
+        X[:, 3:]   # Alle anderen Features (14)
+    ])  # Gesamtform: (n_days, 17)
 
-
+    # Verbesserte Sequenzgenerierung für LSTM
     seq_length = 30
     X_seq, y_seq = [], []
     
+    # Ursprüngliche Sequenzen
     for i in range(len(X_scaled) - seq_length):
         X_seq.append(X_scaled[i:(i + seq_length)])
         y_seq.append(X_scaled[i + seq_length, 2])  # Vorhersage des Kontostands
     
+    # Datenaugmentierung durch leicht veränderte Sequenzen
+    augmentation_count = min(500, len(X_scaled) - seq_length)  # Maximal 500 zusätzliche Sequenzen
+    for i in range(augmentation_count):
+        # Zufälligen Startpunkt wählen
+        start_idx = np.random.randint(0, len(X_scaled) - seq_length)
+        
+        # Sequenz kopieren und leicht modifizieren
+        seq = X_scaled[start_idx:(start_idx + seq_length)].copy()
+        
+        # Kleine zufällige Änderungen hinzufügen (außer beim Kontostand)
+        noise = np.random.normal(0, 0.03, seq.shape)  # 3% Rauschen
+        noise[:, 2] = 0  # Kein Rauschen beim Kontostand
+        seq += noise
+        
+        X_seq.append(seq)
+        y_seq.append(X_scaled[start_idx + seq_length, 2])  # Vorhersage des Kontostands
+    
     X_seq = np.array(X_seq)
     y_seq = np.array(y_seq)
     
-    # Daten aufteilen
+    # Daten aufteilen mit ausgewogener Verteilung
+    indices = np.random.permutation(len(X_seq))
     train_size = int(len(X_seq) * 0.8)
-    X_train, X_test = X_seq[:train_size], X_seq[train_size:]
-    y_train, y_test = y_seq[:train_size], y_seq[train_size:]
+    train_idx, test_idx = indices[:train_size], indices[train_size:]
+    X_train, X_test = X_seq[train_idx], X_seq[test_idx]
+    y_train, y_test = y_seq[train_idx], y_seq[test_idx]
     
 
     model = Sequential([
-        LSTM(64, input_shape=(seq_length, X_scaled.shape[1]), 
+        LSTM(128, input_shape=(seq_length, X_scaled.shape[1]), 
              return_sequences=True, 
-             kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+             kernel_regularizer=tf.keras.regularizers.l2(0.005)),
         BatchNormalization(),
-        Dropout(0.3),
+        Dropout(0.2),
          
-        LSTM(32, 
-             kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+        LSTM(64, return_sequences=True,
+             kernel_regularizer=tf.keras.regularizers.l2(0.005)),
         BatchNormalization(),
-        Dropout(0.3),
+        Dropout(0.2),
+        
+        LSTM(32, 
+             kernel_regularizer=tf.keras.regularizers.l2(0.005)),
+        BatchNormalization(),
+        Dropout(0.2),
         
         Dense(16, activation='relu',
-              kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+              kernel_regularizer=tf.keras.regularizers.l2(0.005)),
         BatchNormalization(),
         
         Dense(1, activation='linear')
@@ -224,18 +258,18 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
                  loss='huber',  # Robuster gegenüber Ausreißern
                  metrics=['mae'])
     
-    # Callbacks
+    # Callbacks mit angepassten Parametern
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=20,
+        patience=50,  # Mehr Geduld für bessere Konvergenz
         restore_best_weights=True,
-        min_delta=1e-4
+        min_delta=1e-5
     )
     
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
-        patience=5,
+        patience=10,  # Mehr Geduld bei Lernraten-Anpassung
         min_lr=1e-6,
         verbose=0
     )
@@ -244,15 +278,15 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     class TrainingProgressCallback(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
             if epoch % 5 == 0:  # Update alle 5 Epochen
-                progress = min((epoch/200) * 1, 0.8) 
+                progress = min((epoch/max(300, 10000)) * 1, 0.8) 
                 update_progress(progress, 
-                              f"Training Epoch {epoch+1}/200 - Loss: {logs['loss']:.4f}, Val Loss: {logs['val_loss']:.4f}")
+                              f"Training Epoch {epoch+1}/10000 - Loss: {logs['loss']:.4f}, Val Loss: {logs['val_loss']:.4f}")
 
-    # Kleinere Batch-Size und mehr Epochen
+    # Anpassung der Batch-Size und Epochen
     history = model.fit(
         X_train, y_train,
-        epochs=200,
-        batch_size=16,
+        epochs=10000,
+        batch_size=32,
         validation_split=0.2,
         callbacks=[early_stopping, reduce_lr, TrainingProgressCallback()],
         verbose=0
@@ -260,14 +294,16 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     
     # Vorhersage
     update_progress(0.87, "Vorhersage wird erstellt...")
-    last_sequence = X_scaled[-seq_length:]  # Shape: (seq_length, 15)
+    last_sequence = X_scaled[-seq_length:]  # Letzte Sequenz
     future_scaled = []
+    future_days = []  # Speichere die erzeugten Tage für die Vorhersage
     
-    for _ in range(days_to_predict):
+    for i in range(days_to_predict):
         next_pred = model.predict(last_sequence.reshape(1, seq_length, X_scaled.shape[1]), verbose=0)
         
         # Nächstes Datum
-        last_date = full_daily_df.index[-1] + pd.Timedelta(days=len(future_scaled) + 1)
+        last_date = full_daily_df.index[-1] + pd.Timedelta(days=i + 1)
+        future_days.append(last_date)
         
         # Feature-Erstellung für das neue Datum
         next_day = last_date.day / 31.0
@@ -276,6 +312,30 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         # Zahlungsmuster-Features
         next_income = create_daily_features(last_date, income_patterns, True)
         next_expense = create_daily_features(last_date, expense_patterns, False)
+        
+        # Extrahiere Gehaltsbetrag für diesen Tag wenn es ein Gehaltszahlungstag ist
+        gehalt_heute = 0
+        if any(income_patterns[
+            (income_patterns['Tag'] == last_date.day) & 
+            income_patterns['ist_gehalt']
+        ].index):
+            gehalt_muster = income_patterns[
+                (income_patterns['Tag'] == last_date.day) & 
+                income_patterns['ist_gehalt']
+            ]
+            gehalt_heute = gehalt_muster['mean'].iloc[0] if not gehalt_muster.empty else 0
+        
+        # Extrahiere Fixkostenbetrag für diesen Tag wenn es ein Fixkostentag ist
+        fixkosten_heute = 0
+        if any(expense_patterns[
+            (expense_patterns['Tag'] == last_date.day) & 
+            expense_patterns['ist_fixkosten']
+        ].index):
+            fixkosten_muster = expense_patterns[
+                (expense_patterns['Tag'] == last_date.day) & 
+                expense_patterns['ist_fixkosten']
+            ]
+            fixkosten_heute = fixkosten_muster['mean'].iloc[0] if not fixkosten_muster.empty else 0
         
         # Zyklische Features
         next_sin_day = np.sin(2 * np.pi * last_date.day / 31.0)
@@ -287,12 +347,16 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
         next_features = np.array([
             next_day,                    # Tag (1)
             next_month,                  # Monat (1)
-            next_pred[0][0],            # Vorhergesagter Kontostand (1)
-            *next_income,               # Income Features (2)
-            *next_expense,              # Expense Features (2)
+            next_pred[0][0],             # Vorhergesagter Kontostand (1)
+            *next_income,                # Income Features (3)
+            *next_expense,               # Expense Features (3)
             next_sin_day, next_cos_day,  # Zyklische Tages-Features (2)
-            next_sin_month, next_cos_month  # Zyklische Monats-Features (2)
-        ]).reshape(1, -1)  # Shape: (1, 11)
+            next_sin_month, next_cos_month,  # Zyklische Monats-Features (2)
+            gehalt_heute / 5000.0,       # Normalisierter Gehaltsbetrag heute (1)
+            abs(fixkosten_heute) / 2000.0,  # Normalisierter Fixkostenbetrag heute (1)
+            1 if last_date.day <= 7 else 0,  # Ist Anfang des Monats (1)
+            1 if last_date.day >= 25 else 0  # Ist Ende des Monats (1)
+        ]).reshape(1, -1)  # Shape: (1, 17)
         
         # Update sequence
         last_sequence = np.vstack([last_sequence[1:], next_features])
@@ -305,19 +369,68 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     future_predictions = []
     last_value = full_daily_df['Tatsächlicher_Betrag'].iloc[-1]
     
-    for pred in future_scaled:
-        # Berechne monatlichen Durchschnitt für den aktuellen Monat
-        current_month = (full_daily_df.index[-1] + pd.Timedelta(days=len(future_predictions) + 1)).month
-        monthly_avg_change = df[df['Monat'] == current_month]['Betrag'].mean()
+    # Berechne Statistiken für die Gehaltszahlungen und Fixkosten
+    salary_days = income_patterns[income_patterns['ist_gehalt']]['Tag'].values if not income_patterns[income_patterns['ist_gehalt']].empty else []
+    salary_amounts = income_patterns[income_patterns['ist_gehalt']]['mean'].values if not income_patterns[income_patterns['ist_gehalt']].empty else []
+    
+    fixed_cost_days = expense_patterns[expense_patterns['ist_fixkosten']]['Tag'].values if not expense_patterns[expense_patterns['ist_fixkosten']].empty else []
+    fixed_cost_amounts = expense_patterns[expense_patterns['ist_fixkosten']]['mean'].values if not expense_patterns[expense_patterns['ist_fixkosten']].empty else []
+    
+    # Berechne durchschnittliche monatliche Änderungen ohne Gehalt und Fixkosten
+    monthly_pattern = df.copy()
+    # Entferne Gehaltszahlungen
+    for day in salary_days:
+        salary_dates = monthly_pattern[monthly_pattern['Tag'] == day].index
+        monthly_pattern.loc[salary_dates, 'Betrag'] = 0
+    
+    # Entferne Fixkosten
+    for day in fixed_cost_days:
+        fixed_cost_dates = monthly_pattern[monthly_pattern['Tag'] == day].index
+        monthly_pattern.loc[fixed_cost_dates, 'Betrag'] = 0
+    
+    # Berechne den täglichen Durchschnitt der verbleibenden Änderungen
+    avg_daily_change = monthly_pattern['Betrag'].mean()
+    
+    # Modell-basierte Vorhersage mit Korrektur durch die erkannten Muster
+    for i, pred_scaled in enumerate(future_scaled):
+        current_date = future_days[i]
         
-        # Begrenze die Änderung auf realistischer Basis
-        max_change = monthly_avg_change * 2  # Maximale Änderung
-        pred_change = pred - last_value
-        clipped_change = np.clip(pred_change, -abs(max_change), abs(max_change))
-        new_value = last_value + clipped_change
+        # Konvertiere den skalierten Wert zurück
+        pred_value = scaler_balance.inverse_transform([[pred_scaled]])[0][0]
         
-        future_predictions.append(new_value)
-        last_value = new_value
+        # Korrigiere die Vorhersage basierend auf bekannten Mustern
+        # 1. Gehaltszahlungen
+        for j, day in enumerate(salary_days):
+            if current_date.day == day:
+                # Füge Gehalt hinzu
+                salary_effect = salary_amounts[j] * 0.8  # Leicht gedämpft
+                pred_value += salary_effect
+        
+        # 2. Fixkosten
+        for j, day in enumerate(fixed_cost_days):
+            if current_date.day == day:
+                # Ziehe Fixkosten ab
+                fixed_cost_effect = fixed_cost_amounts[j] * 0.8  # Leicht gedämpft
+                pred_value += fixed_cost_effect  # Beachte: Fixkosten sind bereits negativ
+        
+        # 3. Tägliche Änderung für sonstige Ausgaben/Einnahmen
+        pred_value += avg_daily_change
+        
+        # Begrenze die tägliche Änderung auf realistische Werte
+        max_change = max(np.abs(salary_amounts).max() if len(salary_amounts) > 0 else 1000, 
+                         np.abs(fixed_cost_amounts).max() if len(fixed_cost_amounts) > 0 else 500) * 1.5
+        
+        # Begrenze die Änderung zum vorherigen Wert
+        change = pred_value - last_value
+        if abs(change) > max_change and i > 0:  # Nicht den ersten Wert begrenzen
+            change = np.clip(change, -max_change, max_change)
+            pred_value = last_value + change
+        
+        # Stelle sicher, dass der Wert nicht unter 0 fällt
+        pred_value = max(0, pred_value)
+        
+        future_predictions.append(pred_value)
+        last_value = pred_value
     
     future_predictions = np.array(future_predictions)
     
@@ -341,10 +454,21 @@ def process_and_predict(file, start_balance=937, cutoff_value=5000, days_to_pred
     # Erstelle ein DataFrame mit den ursprünglichen Features
     feature_names = [
         'Tag', 'Monat', 'Kontostand',
-        'Eingang_Zahlungstag', 'Eingang_Tage_bis_Zahlung',
-        'Ausgang_Zahlungstag', 'Ausgang_Tage_bis_Zahlung',
-        'Sin_Tag', 'Cos_Tag', 'Sin_Monat', 'Cos_Monat'
+        'Eingang_Zahlungstag', 'Eingang_Erwarteter_Betrag', 'Eingang_Tage_bis_Zahlung',
+        'Ausgang_Zahlungstag', 'Ausgang_Erwarteter_Betrag', 'Ausgang_Tage_bis_Zahlung',
+        'Sin_Tag', 'Cos_Tag', 'Sin_Monat', 'Cos_Monat',
+        'Gehaltsbetrag_heute', 'Fixkostenbetrag_heute',
+        'Ist_Anfang_des_Monats', 'Ist_Ende_des_Monats'
     ]
+    
+    # Stelle sicher, dass die Anzahl der Feature-Namen mit der tatsächlichen Anzahl übereinstimmt
+    if len(feature_names) != X.shape[1]:
+        print(f"Warnung: Anzahl Feature-Namen ({len(feature_names)}) stimmt nicht mit Feature-Dimensionen ({X.shape[1]}) überein")
+        # Korrigiere die Namen falls nötig
+        if len(feature_names) < X.shape[1]:
+            feature_names.extend([f'Feature_{i+1}' for i in range(len(feature_names), X.shape[1])])
+        else:
+            feature_names = feature_names[:X.shape[1]]
     
     X_original_df = pd.DataFrame(X, columns=feature_names, index=full_daily_df.index)
 
